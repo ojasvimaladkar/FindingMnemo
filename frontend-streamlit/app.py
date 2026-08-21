@@ -25,7 +25,7 @@ this app is just a client for it.
 import requests
 import streamlit as st
 
-API_URL = "http://localhost:8000/generate"
+API_URL = "https://findingmnemo.onrender.com"
 
 st.set_page_config(page_title="MnemoBuddy", page_icon="assets/logo.png", layout="centered")
 
