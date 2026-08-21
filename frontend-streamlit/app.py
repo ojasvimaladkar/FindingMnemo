@@ -27,7 +27,7 @@ import streamlit as st
 
 API_URL = "https://findingmnemo.onrender.com"
 
-st.set_page_config(page_title="MnemoBuddy", page_icon="frontend-streamlit/assets/logo.png"", layout="centered")
+st.set_page_config(page_title="MnemoBuddy", page_icon="frontend-streamlit/assets/logo.png", layout="centered")
 
 def parse_concepts(raw_text: str) -> list[dict]:
     """
