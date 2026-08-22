@@ -41,7 +41,12 @@ SYNONYM_SYSTEM_PROMPT_TEMPLATE = (
 
 class GroqClient(LLMClient):
     API_URL = "https://api.groq.com/openai/v1/chat/completions"
-    MODEL = "llama-3.3-70b-versatile"
+    # Groq deprecated llama-3.3-70b-versatile (announced 2026-06-17); this
+    # is their recommended replacement for that model. See
+    # https://console.groq.com/docs/deprecations for the current list -
+    # Groq retires models on a rolling basis, so if this one ever 404s
+    # too, check that page before assuming it's a code bug.
+    MODEL = "openai/gpt-oss-120b"
 
     def __init__(self, api_key: str | None = None):
         self.api_key = api_key or os.environ["GROQ_API_KEY"]
