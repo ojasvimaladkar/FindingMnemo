@@ -12,26 +12,6 @@ exact wording, never substitute a synonym), prefix it with "!":
 
 There's also a "Lock all concepts" checkbox for locking everything at
 once without prefixing each concept individually.
-
-THEME: a single, permanent "hacker terminal" look - near-black background,
-JetBrains Mono throughout, phosphor-green accent, sharp corners, a subtle
-scanline texture, and terminal-style prefixes ($ on the button, > and #
-on headers). No light/dark toggle - one theme, always on.
-Streamlit's default widgets (text input, checkbox, button) are re-skinned
-via CSS targeting their stable data-testid attributes, since those are
-far less likely to break across Streamlit versions than the generated
-emotion-cache class names.
-
-LOGO: drop a file at assets/logo.png (or .svg/.jpg - update LOGO_PATH
-below to match) and it'll appear automatically in the header and as the
-browser tab icon. Until then, a text monogram fallback is shown so the
-app doesn't break or look unfinished in the meantime.
-
-Run:
-    pip install streamlit requests
-    streamlit run app.py
-Make sure your FastAPI backend (uvicorn main:app --reload) is running too -
-this app is just a client for it.
 """
 
 from pathlib import Path
@@ -39,7 +19,7 @@ from pathlib import Path
 import requests
 import streamlit as st
 
-API_URL = "http://localhost:8000/generate"
+API_URL = "https://findingmnemo.onrender.com/generate"
 LOGO_PATH = Path(__file__).parent / "assets" / "logo.png"
 
 st.set_page_config(
@@ -48,17 +28,8 @@ st.set_page_config(
     layout="centered",
 )
 
-
 def parse_concepts(raw_text: str, lock_all: bool = False) -> list[dict]:
-    """
-    'Limitations, !Risks, Advantages' ->
-    [{"text": "Limitations", "locked": False},
-     {"text": "Risks", "locked": True},
-     {"text": "Advantages", "locked": False}]
-
-    lock_all=True marks every concept as locked, regardless of whether
-    it was individually prefixed with "!".
-    """
+    
     concepts = []
     for chunk in raw_text.split(","):
         chunk = chunk.strip()
@@ -70,10 +41,6 @@ def parse_concepts(raw_text: str, lock_all: bool = False) -> list[dict]:
             concepts.append({"text": text, "locked": locked})
     return concepts
 
-
-# ---------------------------------------------------------------------------
-# Theme CSS - single dark "terminal" theme
-# ---------------------------------------------------------------------------
 
 DARK_CSS = """
 <style>
