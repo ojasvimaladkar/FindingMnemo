@@ -15,7 +15,7 @@ class ConceptInput(BaseModel):
 
 
 class GenerateRequest(BaseModel):
-    concepts: list[ConceptInput] = Field(..., min_length=1, max_length=8)
+    concepts: list[ConceptInput] = Field(..., min_length=1, max_length=15)
     allow_reorder: bool = False       # matches the "keep input order" default we locked in
     require_real_word: bool = True    # matches the "real dictionary word" default we locked in
 

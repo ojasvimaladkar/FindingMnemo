@@ -14,12 +14,13 @@ There's also a "Lock all concepts" checkbox for locking everything at
 once without prefixing each concept individually.
 """
 
+import os
 from pathlib import Path
 
 import requests
 import streamlit as st
 
-API_URL = "https://findingmnemo.onrender.com/generate"
+API_URL = os.getenv("API_URL", "https://findingmnemo.onrender.com/generate")
 LOGO_PATH = Path(__file__).parent / "assets" / "logo.png"
 
 st.set_page_config(
@@ -293,6 +294,8 @@ if lock_all and allow_reorder:
 if st.button("Generate", type="primary"):
     if not parsed_concepts:
         st.warning("Add at least one concept first.")
+    elif len(parsed_concepts) > 15:
+        st.error(f"Too many concepts: you provided {len(parsed_concepts)}, but at most 15 are supported.")
     else:
         with st.spinner("Fetching synonyms and searching for a valid acronym..."):
             try:

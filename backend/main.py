@@ -6,14 +6,6 @@ This file deliberately does almost nothing "smart." Its whole job:
     2. Call build_concepts() + search() — the exact same functions
        run_pipeline.py calls from the terminal
     3. Convert the result into the response shape and send it back
-
-If you understand run_pipeline.py, you already understand this file -
-it's the same three steps, triggered by an HTTP request instead of
-running as a script.
-
-Run locally:
-    uvicorn main:app --reload
-Then visit http://localhost:8000/docs to try it without any frontend yet.
 """
 
 import os

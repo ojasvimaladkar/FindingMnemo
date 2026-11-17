@@ -51,12 +51,7 @@ DICTIONARY_WORDS: set[str] = {
     w.strip().lower() for w in _DICTIONARY_PATH.read_text().splitlines() if w.strip()
 }
 
-# Two SEPARATE, opt-in word lists - deliberately not merged into
-# COMMON_WORDS, because accepting slang or acronyms is a real choice
-# about tone/audience, not something that should turn on silently.
-# Both are plain text files: edit them freely to add or remove entries -
-# curating slang in particular is subjective, so treat the starter list
-# as a baseline, not a final answer.
+
 _SLANG_PATH = Path(__file__).parent / "data" / "slang_words.txt"
 SLANG_WORDS: set[str] = {
     w.strip().lower() for w in _SLANG_PATH.read_text().splitlines() if w.strip()
@@ -67,22 +62,7 @@ KNOWN_ACRONYMS: set[str] = {
     w.strip().upper() for w in _ACRONYMS_PATH.read_text().splitlines() if w.strip()
 }
 
-# Built from DICTIONARY_WORDS at import time, once. These aren't hand-picked
-# rules - they're just "what letter pairs actually show up at the start/
-# end of real English words, and adjacent to each other anywhere in one."
-# This is what lets us catch something like "LADR": no real word ends in
-# "dr", so its final bigram fails the check, even though a naive vowel-
-# count heuristic would have let it through.
-#
-# IMPORTANT: even a 370k-word "dictionary" turns out to contain technical
-# abbreviations (addr, bldr, cmdr, comdr...) that aren't real English
-# spelling patterns - they just happen to be in the file. A single
-# occurrence shouldn't be enough to validate a pattern. So instead of raw
-# set membership, we count how many DIFFERENT words show each bigram, and
-# only accept patterns above MIN_BIGRAM_COUNT. Real patterns like "rd" as
-# a word-ending appear in 1,000+ words; noise like "dr" as a word-ending
-# appears in about 6 - all abbreviations. The gap between real patterns
-# and noise is enormous, so the exact threshold isn't sensitive.
+
 from collections import Counter as _Counter
 
 MIN_BIGRAM_COUNT = 15
@@ -113,12 +93,7 @@ def letter_of(word_or_phrase: str) -> str:
 
 
 def filter_valid_synonyms(original_concept: str, synonyms: list[str]) -> list[str]:
-    """
-    Drop any 'synonym' that's actually just a word already present in the
-    original phrase (case-insensitive). Real bug we saw: Groq suggested
-    "Rate" as a synonym for "Data Rate" - that's not a substitute, it's
-    just reusing half the original phrase.
-    """
+    
     original_words = {w.lower() for w in re.findall(r"[A-Za-z]+", original_concept)}
     seen = set()
     cleaned = []
@@ -253,36 +228,214 @@ def _build_candidate(concepts: list[ConceptOption], order: list[int], picks: lis
     )
 
 
+def _find_multiword_candidates(
+    concepts: list[ConceptOption],
+    allow_reorder: bool,
+    vocab_sources: list,
+    word_check,
+    max_needed: int = 3,
+) -> list[CandidateResult]:
+    n = len(concepts)
+    if n < 4:
+        return []
+
+    concept_orig_letter = [letter_of(c.original).lower() for c in concepts]
+    concept_syn_letters = []
+    for c in concepts:
+        syn_map = {}
+        if not c.locked:
+            for s in c.synonyms:
+                let = letter_of(s).lower()
+                if let not in syn_map:
+                    syn_map[let] = s
+        concept_syn_letters.append(syn_map)
+
+    all_allowed = set(concept_orig_letter)
+    for sm in concept_syn_letters:
+        all_allowed.update(sm.keys())
+
+    words_by_len: dict[int, list[str]] = {}
+    for vocab in vocab_sources:
+        for w in vocab:
+            l = len(w)
+            if 2 <= l <= 7 and not any(ch not in all_allowed for ch in w.lower()):
+                words_by_len.setdefault(l, []).append(w.lower())
+
+    splits = []
+    for l1 in range(max(2, n - 7), min(8, n - 1)):
+        l2 = n - l1
+        if 2 <= l2 <= 7:
+            splits.append([l1, l2])
+    if n >= 6:
+        for l1 in range(max(2, n - 14), min(7, n - 3)):
+            for l2 in range(max(2, n - l1 - 7), min(7, n - l1 - 1)):
+                l3 = n - l1 - l2
+                if 2 <= l3 <= 7:
+                    splits.append([l1, l2, l3])
+    splits.sort(key=lambda s: (len(s), max(s) - min(s)))
+
+    results: list[CandidateResult] = []
+    seen_phrases: set[str] = set()
+
+    if not allow_reorder:
+        for split in splits:
+            idx = 0
+            seg_matches = []
+            possible = True
+            for seg_len in split:
+                seg_c_orig = concept_orig_letter[idx:idx + seg_len]
+                seg_c_syn = concept_syn_letters[idx:idx + seg_len]
+                idx += seg_len
+                valid_words = []
+                for w in words_by_len.get(seg_len, []):
+                    m_possible = True
+                    used = []
+                    subs = 0
+                    for pos, ch in enumerate(w):
+                        c_idx = idx - seg_len + pos
+                        if seg_c_orig[pos] == ch:
+                            used.append(concepts[c_idx].original)
+                        elif ch in seg_c_syn[pos]:
+                            used.append(seg_c_syn[pos][ch])
+                            subs += 1
+                        else:
+                            m_possible = False
+                            break
+                    if m_possible:
+                        valid_words.append((w.upper(), subs, used))
+                if not valid_words:
+                    possible = False
+                    break
+                valid_words.sort(key=lambda x: x[1])
+                seg_matches.append(valid_words[:2])
+            if possible:
+                for combo in itertools.product(*seg_matches):
+                    phrase = " ".join(c[0] for c in combo)
+                    if phrase not in seen_phrases:
+                        seen_phrases.add(phrase)
+                        total_subs = sum(c[1] for c in combo)
+                        all_used = [w for c in combo for w in c[2]]
+                        results.append(CandidateResult(
+                            word=phrase,
+                            concept_order=[c.original for c in concepts],
+                            words_used=all_used,
+                            substitutions=total_subs,
+                            reordered=False,
+                            passes_word_check=True,
+                            score=sum(pronounceability_score(c[0]) for c in combo),
+                        ))
+                        if len(results) >= max_needed:
+                            return results
+    else:
+        def match_target(target: str, allowed_indices: list[int]):
+            t_len = len(target)
+            best = None
+            min_s = 999
+            def dfs(pos, used_mask, cur_subs):
+                nonlocal best, min_s
+                if cur_subs >= min_s:
+                    return
+                if pos == t_len:
+                    best = (cur_subs, list(order), list(words))
+                    min_s = cur_subs
+                    return
+                ch = target[pos]
+                for idx in allowed_indices:
+                    if not (used_mask & (1 << idx)):
+                        if concept_orig_letter[idx] == ch:
+                            order.append(idx)
+                            words.append(concepts[idx].original)
+                            dfs(pos + 1, used_mask | (1 << idx), cur_subs)
+                            order.pop()
+                            words.pop()
+                for idx in allowed_indices:
+                    if not (used_mask & (1 << idx)):
+                        if ch in concept_syn_letters[idx]:
+                            order.append(idx)
+                            words.append(concept_syn_letters[idx][ch])
+                            dfs(pos + 1, used_mask | (1 << idx), cur_subs + 1)
+                            order.pop()
+                            words.pop()
+            order = []
+            words = []
+            dfs(0, 0, 0)
+            return best
+
+        for split in splits:
+            if len(split) == 2:
+                l1, l2 = split
+                w1_candidates = words_by_len.get(l1, [])
+                for w1 in w1_candidates[:60]:
+                    m1 = match_target(w1, list(range(n)))
+                    if m1 and m1[0] <= 4:
+                        used_indices = set(m1[1])
+                        rem_indices = [i for i in range(n) if i not in used_indices]
+                        for w2 in words_by_len.get(l2, []):
+                            m2 = match_target(w2, rem_indices)
+                            if m2 and m2[0] <= 4:
+                                phrase = f"{w1.upper()} {w2.upper()}"
+                                if phrase not in seen_phrases:
+                                    seen_phrases.add(phrase)
+                                    order = m1[1] + m2[1]
+                                    words_used = m1[2] + m2[2]
+                                    results.append(CandidateResult(
+                                        word=phrase,
+                                        concept_order=[concepts[i].original for i in order],
+                                        words_used=words_used,
+                                        substitutions=m1[0] + m2[0],
+                                        reordered=True,
+                                        passes_word_check=True,
+                                        score=pronounceability_score(w1) + pronounceability_score(w2),
+                                    ))
+                                    if len(results) >= max_needed:
+                                        return results
+                                    break
+            elif len(split) == 3 and len(results) < max_needed:
+                l1, l2, l3 = split
+                for w1 in words_by_len.get(l1, [])[:30]:
+                    m1 = match_target(w1, list(range(n)))
+                    if m1 and m1[0] <= 3:
+                        u1 = set(m1[1])
+                        rem1 = [i for i in range(n) if i not in u1]
+                        for w2 in words_by_len.get(l2, [])[:30]:
+                            m2 = match_target(w2, rem1)
+                            if m2 and m2[0] <= 3:
+                                u2 = u1 | set(m2[1])
+                                rem2 = [i for i in range(n) if i not in u2]
+                                for w3 in words_by_len.get(l3, []):
+                                    m3 = match_target(w3, rem2)
+                                    if m3 and m3[0] <= 3:
+                                        phrase = f"{w1.upper()} {w2.upper()} {w3.upper()}"
+                                        if phrase not in seen_phrases:
+                                            seen_phrases.add(phrase)
+                                            order = m1[1] + m2[1] + m3[1]
+                                            words_used = m1[2] + m2[2] + m3[2]
+                                            results.append(CandidateResult(
+                                                word=phrase,
+                                                concept_order=[concepts[i].original for i in order],
+                                                words_used=words_used,
+                                                substitutions=m1[0] + m2[0] + m3[0],
+                                                reordered=True,
+                                                passes_word_check=True,
+                                                score=pronounceability_score(w1) + pronounceability_score(w2) + pronounceability_score(w3),
+                                            ))
+                                            if len(results) >= max_needed:
+                                                return results
+                                            break
+                                if len(results) >= max_needed:
+                                    return results
+    return results
+
+
 def search(
     concepts: list[ConceptOption],
     allow_reorder: bool = False,
     require_real_word: bool = True,
     allow_slang_and_acronyms: bool = False,
-    max_concepts: int = 8,
+    max_concepts: int = 15,
     max_results: int = 3,
 ) -> SearchResult:
-    """
-    The main entry point. Tries increasing numbers of synonym substitutions
-    (0, 1, 2, ...) before trying more, and only explores reordering if
-    allow_reorder=True. Collects up to max_results DISTINCT passing words
-    (deduped, so we never show the same word 3 times) and stops as soon as
-    it has enough - since we search in order of "fewest substitutions
-    first," the results list is naturally ranked best-first: closer to
-    what the user actually typed comes earlier in the list.
-
-    allow_slang_and_acronyms is independent of require_real_word: it's an
-    OR, not a replacement. With it on, a word passes if it clears the
-    normal bar (real word or pronounceable, per require_real_word) OR it's
-    in the curated slang/acronym lists - so turning it on only ever makes
-    the search MORE permissive, never less.
-
-    max_concepts is a deliberate, documented limit: with reordering on, we
-    try every permutation of concept order, which is n! - factorial growth.
-    8! is ~40,000, still instant; go much higher and it stops being
-    instant. If you need more than 8 concepts with reordering, the search
-    strategy here would need to become smarter (e.g. only trying promising
-    orderings) rather than brute-force.
-    """
+    
     n = len(concepts)
     if n > max_concepts:
         raise ValueError(f"search() supports up to {max_concepts} concepts (got {n}).")
@@ -294,43 +447,201 @@ def search(
     else:
         word_check = base_check
 
-    orders = [list(range(n))]
-    if allow_reorder:
-        orders = [list(p) for p in itertools.permutations(range(n))]
+    # For small concept counts (n <= 5), the permutation & combinatorial substitution search works well.
+    if (not allow_reorder and n <= 5) or (allow_reorder and n <= 5):
+        orders = [list(range(n))]
+        if allow_reorder:
+            orders = [list(p) for p in itertools.permutations(range(n))]
 
-    all_candidates: list[CandidateResult] = []
-    found: list[CandidateResult] = []
+        all_candidates: list[CandidateResult] = []
+        found: list[CandidateResult] = []
+        seen_words: set[str] = set()
+        unlocked_indices = [i for i, c in enumerate(concepts) if not c.locked]
+
+        # Increasing substitution levels: 0 = everyone uses their original word,
+        # 1 = exactly one unlocked concept swapped, etc.
+        for level in range(len(unlocked_indices) + 1):
+            for substituted_set in itertools.combinations(unlocked_indices, level):
+                alt_index_options = []
+                for i in substituted_set:
+                    num_choices = len(concepts[i].choices())
+                    alt_index_options.append(range(1, num_choices) if num_choices > 1 else range(0, 0))
+
+                for alt_combo in itertools.product(*alt_index_options) if substituted_set else [()]:
+                    picks = [0] * n
+                    for i, alt_idx in zip(substituted_set, alt_combo):
+                        picks[i] = alt_idx
+
+                    for order in orders:
+                        candidate = _build_candidate(concepts, order, picks, word_check)
+                        all_candidates.append(candidate)
+                        if candidate.passes_word_check and candidate.word not in seen_words:
+                            seen_words.add(candidate.word)
+                            found.append(candidate)
+                            if len(found) >= max_results:
+                                return SearchResult(success=True, results=found, near_misses=[])
+
+        if found:
+            return SearchResult(success=True, results=found, near_misses=[])
+
+        # If single-word search found nothing and n >= 4, attempt multi-word phrases
+        vocab_sources = [COMMON_WORDS]
+        if allow_slang_and_acronyms:
+            vocab_sources.extend([SLANG_WORDS, KNOWN_ACRONYMS])
+        if not require_real_word:
+            vocab_sources.append(DICTIONARY_WORDS)
+        multiword_cands = _find_multiword_candidates(
+            concepts,
+            allow_reorder=allow_reorder,
+            vocab_sources=vocab_sources,
+            word_check=word_check,
+            max_needed=max_results,
+        )
+        if multiword_cands:
+            return SearchResult(success=True, results=multiword_cands[:max_results], near_misses=[])
+
+        near_misses = sorted(all_candidates, key=lambda c: c.score, reverse=True)[:3]
+        return SearchResult(success=False, results=[], near_misses=near_misses)
+
+    # For larger concept counts (up to 15), dictionary-guided branch & bound search
+    concept_orig_letter = [letter_of(c.original).lower() for c in concepts]
+    concept_syn_letters = []
+    for c in concepts:
+        syn_map = {}
+        if not c.locked:
+            for s in c.synonyms:
+                let = letter_of(s).lower()
+                if let not in syn_map:
+                    syn_map[let] = s
+        concept_syn_letters.append(syn_map)
+
+    vocab_sources = [COMMON_WORDS]
+    if allow_slang_and_acronyms:
+        vocab_sources.extend([SLANG_WORDS, KNOWN_ACRONYMS])
+    if not require_real_word:
+        vocab_sources.append(DICTIONARY_WORDS)
+
+    all_allowed_letters = set(concept_orig_letter)
+    for s_map in concept_syn_letters:
+        all_allowed_letters.update(s_map.keys())
+
+    matched_candidates: list[CandidateResult] = []
     seen_words: set[str] = set()
-    unlocked_indices = [i for i, c in enumerate(concepts) if not c.locked]
 
-    # Increasing substitution levels: 0 = everyone uses their original word,
-    # 1 = exactly one unlocked concept swapped, etc.
-    for level in range(len(unlocked_indices) + 1):
-        for substituted_set in itertools.combinations(unlocked_indices, level):
-            # For concepts NOT in substituted_set, pick index 0 (their original word).
-            # For concepts IN substituted_set, try every synonym (index >= 1).
-            alt_index_options = []
-            for i in substituted_set:
-                num_choices = len(concepts[i].choices())
-                alt_index_options.append(range(1, num_choices) if num_choices > 1 else range(0, 0))
+    for vocab in vocab_sources:
+        for raw_word in vocab:
+            if len(raw_word) != n:
+                continue
+            w_lower = raw_word.lower()
+            if any(ch not in all_allowed_letters for ch in w_lower):
+                continue
+            target_letters = list(w_lower)
 
-            for alt_combo in itertools.product(*alt_index_options) if substituted_set else [()]:
-                picks = [0] * n
-                for i, alt_idx in zip(substituted_set, alt_combo):
-                    picks[i] = alt_idx
+            if not allow_reorder:
+                subs = 0
+                words_used = []
+                possible = True
+                for i in range(n):
+                    t_let = target_letters[i]
+                    if concept_orig_letter[i] == t_let:
+                        words_used.append(concepts[i].original)
+                    elif t_let in concept_syn_letters[i]:
+                        words_used.append(concept_syn_letters[i][t_let])
+                        subs += 1
+                    else:
+                        possible = False
+                        break
+                if possible:
+                    cand_word = w_lower.upper()
+                    if cand_word not in seen_words:
+                        seen_words.add(cand_word)
+                        matched_candidates.append(CandidateResult(
+                            word=cand_word,
+                            concept_order=[c.original for c in concepts],
+                            words_used=words_used,
+                            substitutions=subs,
+                            reordered=False,
+                            passes_word_check=word_check(cand_word),
+                            score=pronounceability_score(cand_word)
+                        ))
+            else:
+                best_match = None
+                min_subs = 999
+                def dfs(pos, used_mask, cur_subs):
+                    nonlocal best_match, min_subs
+                    if cur_subs >= min_subs:
+                        return
+                    if pos == n:
+                        best_match = (cur_subs, list(cur_order), list(cur_words))
+                        min_subs = cur_subs
+                        return
+                    t_let = target_letters[pos]
+                    for i in range(n):
+                        if not (used_mask & (1 << i)):
+                            if concept_orig_letter[i] == t_let:
+                                cur_order.append(i)
+                                cur_words.append(concepts[i].original)
+                                dfs(pos + 1, used_mask | (1 << i), cur_subs)
+                                cur_order.pop()
+                                cur_words.pop()
+                    for i in range(n):
+                        if not (used_mask & (1 << i)):
+                            if t_let in concept_syn_letters[i]:
+                                cur_order.append(i)
+                                cur_words.append(concept_syn_letters[i][t_let])
+                                dfs(pos + 1, used_mask | (1 << i), cur_subs + 1)
+                                cur_order.pop()
+                                cur_words.pop()
+                cur_order = []
+                cur_words = []
+                dfs(0, 0, 0)
+                if best_match:
+                    cand_word = w_lower.upper()
+                    if cand_word not in seen_words:
+                        seen_words.add(cand_word)
+                        subs, order, words_used = best_match
+                        matched_candidates.append(CandidateResult(
+                            word=cand_word,
+                            concept_order=[concepts[idx].original for idx in order],
+                            words_used=words_used,
+                            substitutions=subs,
+                            reordered=True,
+                            passes_word_check=word_check(cand_word),
+                            score=pronounceability_score(cand_word)
+                        ))
+            if len(matched_candidates) >= 50:
+                break
+        if len(matched_candidates) >= max_results:
+            break
 
-                for order in orders:
-                    candidate = _build_candidate(concepts, order, picks, word_check)
-                    all_candidates.append(candidate)
-                    if candidate.passes_word_check and candidate.word not in seen_words:
-                        seen_words.add(candidate.word)
-                        found.append(candidate)
-                        if len(found) >= max_results:
-                            return SearchResult(success=True, results=found, near_misses=[])
+    passing = [c for c in matched_candidates if c.passes_word_check]
+    if len(passing) < max_results:
+        # Also explore multi-word phrases (e.g. 2-word or 3-word combinations)
+        multiword_cands = _find_multiword_candidates(
+            concepts,
+            allow_reorder=allow_reorder,
+            vocab_sources=vocab_sources,
+            word_check=word_check,
+            max_needed=max_results - len(passing),
+        )
+        for mwc in multiword_cands:
+            if mwc.word not in seen_words:
+                seen_words.add(mwc.word)
+                passing.append(mwc)
 
-    if found:
-        return SearchResult(success=True, results=found, near_misses=[])
+    if passing:
+        passing.sort(key=lambda c: (c.substitutions, c.reordered))
+        return SearchResult(success=True, results=passing[:max_results], near_misses=[])
 
-    # Nothing passed - return the closest attempts instead of a flat failure.
-    near_misses = sorted(all_candidates, key=lambda c: c.score, reverse=True)[:3]
+    base_words = [c.original for c in concepts]
+    base_acronym = "".join(letter_of(w) for w in base_words)
+    near_misses = [CandidateResult(
+        word=base_acronym,
+        concept_order=[c.original for c in concepts],
+        words_used=base_words,
+        substitutions=0,
+        reordered=False,
+        passes_word_check=word_check(base_acronym),
+        score=pronounceability_score(base_acronym)
+    )]
     return SearchResult(success=False, results=[], near_misses=near_misses)
